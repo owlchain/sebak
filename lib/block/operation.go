@@ -86,6 +86,24 @@ func (bo *BlockOperation) Save(st *storage.LevelDBBackend) (err error) {
 	if err = st.New(bo.NewBlockOperationSourceKey(), bo.Hash); err != nil {
 		return
 	}
+
+	var body operation.Body
+	if bo.Type == operation.TypeCreateAccount {
+		var casted operation.CreateAccount
+		var ok bool
+		if body, err = operation.UnmarshalBodyJSON(bo.Type, bo.Body); err != nil {
+			return
+		}
+		if casted, ok = body.(operation.CreateAccount); !ok {
+			return errors.ErrorTypeOperationBodyNotMatched
+		}
+		if casted.Linked != "" {
+			if err = st.New(GetBlockOperationCreateFrozenKey(casted.Target), bo.Hash); err != nil {
+				return
+			}
+		}
+	}
+
 	bo.isSaved = true
 
 	event := "saved"
@@ -109,6 +127,14 @@ func (bo BlockOperation) Transaction() transaction.Transaction {
 
 func GetBlockOperationKey(hash string) string {
 	return fmt.Sprintf("%s%s", common.BlockOperationPrefixHash, hash)
+}
+
+func GetBlockOperationCreateFrozenKey(hash string) string {
+	return fmt.Sprintf(
+		"%s%s",
+		common.BlockOperationPrefixCreateFrozen,
+		hash,
+	)
 }
 
 func GetBlockOperationKeyPrefixTxHash(txHash string) string {
@@ -145,6 +171,20 @@ func ExistsBlockOperation(st *storage.LevelDBBackend, hash string) (bool, error)
 
 func GetBlockOperation(st *storage.LevelDBBackend, hash string) (bo BlockOperation, err error) {
 	if err = st.Get(GetBlockOperationKey(hash), &bo); err != nil {
+		return
+	}
+
+	bo.isSaved = true
+	return
+}
+
+func GetBlockOperationCreateFrozen(st *storage.LevelDBBackend, hash string) (bo BlockOperation, err error) {
+	var address string
+	if err = st.Get(GetBlockOperationCreateFrozenKey(hash), &address); err != nil {
+		return
+	}
+	fmt.Println(address)
+	if bo, err = GetBlockOperation(st, address); err != nil {
 		return
 	}
 

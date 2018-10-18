@@ -63,6 +63,22 @@ func (b *BlockAccount) Save(st *storage.LevelDBBackend) (err error) {
 		createdKey := GetBlockAccountCreatedKey(common.GetUniqueIDFromUUID())
 		err = st.New(createdKey, b.Address)
 	}
+	if err != nil {
+		return
+	}
+	if b.Linked != "" {
+		frozenKey := b.NewBlockAccountFrozenKey()
+
+		exists, err = st.Has(frozenKey)
+		if err != nil {
+			return
+		}
+
+		if !exists {
+			err = st.New(frozenKey, b.Address)
+		}
+	}
+
 	if err == nil {
 		event := "saved"
 		event += " " + fmt.Sprintf("address-%s", b.Address)
@@ -87,12 +103,24 @@ func (b *BlockAccount) Deserialize(encoded []byte) (err error) {
 	return common.DecodeJSONValue(encoded, b)
 }
 
+func (b *BlockAccount) NewBlockAccountFrozenKey() string {
+	return fmt.Sprintf(
+		"%s%s",
+		GetBlockAccountKeyPrefixFrozen(b.Linked),
+		b.Address,
+	)
+}
+
 func GetBlockAccountKey(address string) string {
 	return fmt.Sprintf("%s%s", common.BlockAccountPrefixAddress, address)
 }
 
 func GetBlockAccountCreatedKey(created string) string {
 	return fmt.Sprintf("%s%s", common.BlockAccountPrefixCreated, created)
+}
+
+func GetBlockAccountKeyPrefixFrozen(linked string) string {
+	return fmt.Sprintf("%s%s", common.BlockAccountPrefixFrozen, linked)
 }
 
 func ExistsBlockAccount(st *storage.LevelDBBackend, address string) (exists bool, err error) {
@@ -146,8 +174,55 @@ func GetBlockAccountsByCreated(st *storage.LevelDBBackend, options storage.ListO
 		})
 }
 
+func LoadBlockAccountsInsideIterator(
+	st *storage.LevelDBBackend,
+	iterFunc func() (storage.IterItem, bool),
+	closeFunc func(),
+) (
+	func() (*BlockAccount, bool, []byte),
+	func(),
+) {
+
+	return (func() (*BlockAccount, bool, []byte) {
+			item, hasNext := iterFunc()
+			if !hasNext {
+				return &BlockAccount{}, false, item.Key
+			}
+
+			var hash string
+			json.Unmarshal(item.Value, &hash)
+
+			ba, err := GetBlockAccount(st, hash)
+			if err != nil {
+				return &BlockAccount{}, false, item.Key
+			}
+
+			return ba, hasNext, item.Key
+		}), (func() {
+			closeFunc()
+		})
+}
+
+func GetBlockAccountsByLinked(st *storage.LevelDBBackend, linked string, options storage.ListOptions) (
+	func() (*BlockAccount, bool, []byte),
+	func(),
+) {
+	iterFunc, closeFunc := st.GetIterator(GetBlockAccountKeyPrefixFrozen(linked), options)
+
+	return LoadBlockAccountsInsideIterator(st, iterFunc, closeFunc)
+}
+
 func (b *BlockAccount) GetBalance() common.Amount {
 	return b.Balance
+}
+
+func GetBlockAccountsByFrozen(st *storage.LevelDBBackend, options storage.ListOptions) (
+	func() (*BlockAccount, bool, []byte),
+	func(),
+) {
+	iterFunc, closeFunc := st.GetIterator(common.BlockAccountPrefixFrozen, options)
+
+	return LoadBlockAccountsInsideIterator(st, iterFunc, closeFunc)
 }
 
 // Add fund to an account
