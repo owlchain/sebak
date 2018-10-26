@@ -1,7 +1,7 @@
 version: 2
 
 defaults: &defaults
-  working_directory: /go/src/boscoin.io/sebak
+  working_directory: /home/circleci/sebak
   docker:
     - image: circleci/golang:1.11
 
@@ -14,26 +14,24 @@ jobs:
     <<: *defaults
     steps:
       - checkout
-      - run:
-          name: install dep
-          command: curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
       - restore_cache:
-          key: dependency-cache-{{ checksum "Gopkg.lock" }}
+          key: dependency-cache-mod-{{ checksum "go.sum" }}
       - run:
-          name: install dependencies
-          command: dep ensure
+          name: Download dependencies
+          command: go mod download
       - run:
           name: Run go vet
           command: go vet ./...
       - save_cache:
-          key: dependency-cache-{{ checksum "Gopkg.lock" }}
+          key: dependency-cache-mod-{{ checksum "go.sum" }}
           paths:
-            - vendor
+            - /go/pkg/mod/
       - persist_to_workspace:
           root: /
           paths:
-            - go/src/boscoin.io/sebak
+            - home/circleci/sebak
             - home/circleci/.ssh
+            - go/pkg/mod/
 
   fmt:
     <<: *defaults
@@ -43,23 +41,15 @@ jobs:
           name: check formatting
           command: if [[ -n "$(gofmt -l cmd lib)" ]]; then gofmt -l cmd lib; exit 1; fi
 
-  test_go1_10:
-    <<: *defaults
-    steps:
-      - <<: *workspace
-      - run:
-          name: run tests
-          command: SEBAK_LOG_HANDLER=null go test -v -timeout 3m ./...
-
   test_go1_11:
     docker:
       - image: circleci/golang:1.11
-    working_directory: /go/src/boscoin.io/sebak
+    working_directory: /home/circleci/sebak
     steps:
       - <<: *workspace
       - run:
           name: run tests
-          command: SEBAK_LOG_HANDLER=null go test -v -timeout 3m ./...
+          command: SEBAK_LOG_HANDLER=null go test -v -timeout 8m `go list ./... | grep -v tests`
 
   generate_merged_tree:
     <<: *defaults
@@ -78,7 +68,7 @@ jobs:
       - persist_to_workspace:
           root: /
           paths:
-            - go/src/boscoin.io/sebak
+            - home/circleci/sebak
 
   unittests:
     <<: *defaults
@@ -87,8 +77,8 @@ jobs:
       - run:
           name: run tests
           command: |
-            for pkg in $(go list ./... | grep -v vendor); do
-                SEBAK_LOG_HANDLER=null go test -v -timeout 3m -coverprofile=profile.out "$pkg"
+            for pkg in $(go list ./... | grep -v vendor | grep -v tests); do
+                SEBAK_LOG_HANDLER=null go test -race -v -timeout 8m -coverprofile=profile.out "$pkg"
                 if [ -f profile.out ]; then
                     cat profile.out >> coverage.txt
                     rm profile.out
@@ -98,17 +88,38 @@ jobs:
           name: upload coverage reports
           command: bash <(curl -s https://codecov.io/bash) -F unittests
 
-  integration_tests:
+  integration_tests_node:
     <<: *defaults
     steps:
       - setup_remote_docker
       - <<: *workspace
       - run:
-          name: integration tests
-          command: ./tests/run.sh
+          name: integration tests node
+          command: ./tests/node/run.sh
       - run:
           name: upload coverage reports
-          command: bash <(curl -s https://codecov.io/bash) -F integration_tests
+          command: bash <(curl -s https://codecov.io/bash) -F integration_tests_node
+
+  integration_tests_sdk:
+    <<: *defaults
+    steps:
+      - setup_remote_docker
+      - <<: *workspace
+      - run:
+          name: integration tests sdk
+          command: ./tests/client/run.sh
+      - run:
+          name: upload coverage reports
+          command: bash <(curl -s https://codecov.io/bash) -F integration_tests_client
+
+  integration_tests_block_time:
+    <<: *defaults
+    steps:
+      - setup_remote_docker
+      - <<: *workspace
+      - run:
+          name: integration tests block_time
+          command: ./tests/block-time/run.sh
 
 workflows:
   version: 2
@@ -118,9 +129,6 @@ workflows:
       - fmt:
           requires:
             - build
-      - test_go1_10:
-          requires:
-            - fmt
       - test_go1_11:
           requires:
             - fmt
@@ -130,6 +138,12 @@ workflows:
       - unittests:
           requires:
             - generate_merged_tree
-      - integration_tests:
+      - integration_tests_node:
+          requires:
+            - generate_merged_tree
+      - integration_tests_sdk:
+          requires:
+            - generate_merged_tree
+      - integration_tests_block_time:
           requires:
             - generate_merged_tree

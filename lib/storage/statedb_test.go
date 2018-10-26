@@ -5,10 +5,7 @@ import (
 )
 
 func newTestStateDB(t *testing.T) (*LevelDBBackend, *LevelDBBackend, *StateDB) {
-	st, err := NewTestMemoryLevelDBBackend()
-	if err != nil {
-		t.Fatal(err)
-	}
+	st := NewTestStorage()
 	ts, err := st.OpenTransaction()
 	if err != nil {
 		t.Fatal(err)
@@ -17,14 +14,6 @@ func newTestStateDB(t *testing.T) (*LevelDBBackend, *LevelDBBackend, *StateDB) {
 	sdb := NewStateDB(ts)
 
 	return st, ts, sdb
-}
-
-func TestStateDBInterface(t *testing.T) {
-	var sdb DBBackend
-	_, _, sdb = newTestStateDB(t)
-	if _, err := sdb.Has("hello"); err != nil {
-		t.Error(err)
-	}
 }
 
 func TestStateDBNewCommit(t *testing.T) {

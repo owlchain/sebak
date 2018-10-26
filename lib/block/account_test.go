@@ -7,29 +7,29 @@ import (
 	"testing"
 
 	"boscoin.io/sebak/lib/common"
-	"boscoin.io/sebak/lib/observer"
+	"boscoin.io/sebak/lib/common/observer"
 	"boscoin.io/sebak/lib/storage"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestSaveNewBlockAccount(t *testing.T) {
-	st, _ := storage.NewTestMemoryLevelDBBackend()
+	st := storage.NewTestStorage()
 
 	b := TestMakeBlockAccount()
 	err := b.Save(st)
 	require.Nil(t, err)
 
-	exists, err := ExistBlockAccount(st, b.Address)
+	exists, err := ExistsBlockAccount(st, b.Address)
 	require.Nil(t, err)
 	require.Equal(t, exists, true, "BlockAccount does not exists")
 }
 
 func TestSaveExistingBlockAccount(t *testing.T) {
-	st, _ := storage.NewTestMemoryLevelDBBackend()
+	st := storage.NewTestStorage()
 
 	b := TestMakeBlockAccount()
-	b.Save(st)
+	b.MustSave(st)
 
 	err := b.Deposit(common.Amount(100))
 	require.Nil(t, err)
@@ -38,24 +38,24 @@ func TestSaveExistingBlockAccount(t *testing.T) {
 	require.Nil(t, err)
 
 	fetched, _ := GetBlockAccount(st, b.Address)
-	require.Equal(t, b.Balance, fetched.Balance)
+	require.Equal(t, b.GetBalance(), fetched.GetBalance())
 }
 
 func TestSortMultipleBlockAccount(t *testing.T) {
-	st, _ := storage.NewTestMemoryLevelDBBackend()
+	st := storage.NewTestStorage()
 
 	var createdOrder []string
 	for i := 0; i < 50; i++ {
 		b := TestMakeBlockAccount()
-		b.Save(st)
+		b.MustSave(st)
 
 		createdOrder = append(createdOrder, b.Address)
 	}
 
 	var saved []string
-	iterFunc, closeFunc := GetBlockAccountAddressesByCreated(st, false)
+	iterFunc, closeFunc := GetBlockAccountAddressesByCreated(st, nil)
 	for {
-		address, hasNext := iterFunc()
+		address, hasNext, _ := iterFunc()
 		if !hasNext {
 			break
 		}
@@ -70,20 +70,20 @@ func TestSortMultipleBlockAccount(t *testing.T) {
 }
 
 func TestGetSortedBlockAccounts(t *testing.T) {
-	st, _ := storage.NewTestMemoryLevelDBBackend()
+	st := storage.NewTestStorage()
 
 	var createdOrder []string
 	for i := 0; i < 50; i++ {
 		b := TestMakeBlockAccount()
-		b.Save(st)
+		b.MustSave(st)
 
 		createdOrder = append(createdOrder, b.Address)
 	}
 
 	var saved []string
-	iterFunc, closeFunc := GetBlockAccountsByCreated(st, false)
+	iterFunc, closeFunc := GetBlockAccountsByCreated(st, nil)
 	for {
-		ba, hasNext := iterFunc()
+		ba, hasNext, _ := iterFunc()
 		if !hasNext {
 			break
 		}
@@ -98,24 +98,26 @@ func TestGetSortedBlockAccounts(t *testing.T) {
 }
 
 func TestBlockAccountSaveBlockAccountSequenceIDs(t *testing.T) {
-	st, _ := storage.NewTestMemoryLevelDBBackend()
+	st := storage.NewTestStorage()
 
 	b := TestMakeBlockAccount()
-	b.Save(st)
+	b.MustSave(st)
 
+	expectedSavedLength := 10
 	var saved []BlockAccount
 	saved = append(saved, *b)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < expectedSavedLength-len(saved); i++ {
 		b.SequenceID = rand.Uint64()
-		b.Save(st)
+		b.MustSave(st)
 
 		saved = append(saved, *b)
 	}
 
 	var fetched []BlockAccountSequenceID
-	iterFunc, closeFunc := GetBlockAccountSequenceIDByAddress(st, b.Address, false)
+	options := storage.NewDefaultListOptions(false, nil, uint64(expectedSavedLength))
+	iterFunc, closeFunc := GetBlockAccountSequenceIDByAddress(st, b.Address, options)
 	for {
-		bac, hasNext := iterFunc()
+		bac, hasNext, _ := iterFunc()
 		if !hasNext {
 			break
 		}
@@ -123,10 +125,11 @@ func TestBlockAccountSaveBlockAccountSequenceIDs(t *testing.T) {
 	}
 	closeFunc()
 
-	for i := 0; i < len(saved); i++ {
-		require.Equal(t, saved[i].Address, fetched[i].Address)
-		require.Equal(t, saved[i].Balance, fetched[i].Balance)
-		require.Equal(t, saved[i].SequenceID, fetched[i].SequenceID)
+	require.Equal(t, len(saved), len(fetched))
+	for i, b := range saved {
+		require.Equal(t, b.Address, fetched[i].Address)
+		require.Equal(t, b.GetBalance(), fetched[i].Balance)
+		require.Equal(t, b.SequenceID, fetched[i].SequenceID)
 	}
 }
 func TestBlockAccountObserver(t *testing.T) {
@@ -143,13 +146,13 @@ func TestBlockAccountObserver(t *testing.T) {
 	observer.BlockAccountObserver.On(fmt.Sprintf("address-%s", b.Address), ObserverFunc)
 	defer observer.BlockAccountObserver.Off(fmt.Sprintf("address-%s", b.Address), ObserverFunc)
 
-	st, _ := storage.NewTestMemoryLevelDBBackend()
+	st := storage.NewTestStorage()
 
-	b.Save(st)
+	b.MustSave(st)
 
 	wg.Wait()
 
 	require.Equal(t, b.Address, triggered.Address)
-	require.Equal(t, b.Balance, triggered.Balance)
+	require.Equal(t, b.GetBalance(), triggered.GetBalance())
 	require.Equal(t, b.SequenceID, triggered.SequenceID)
 }

@@ -2,16 +2,18 @@ package common
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/url"
 	"os"
-	"sync"
-	"sync/atomic"
+	"sort"
 
 	uuid "github.com/satori/go.uuid"
 	"github.com/stellar/go/keypair"
 )
+
+const MaxUintEncodeByte = 8
 
 func GetUniqueIDFromUUID() string {
 	return uuid.Must(uuid.NewV1(), nil).String()
@@ -23,29 +25,6 @@ func GenerateUUID() string {
 
 func GetUniqueIDFromDate() string {
 	return NowISO8601()
-}
-
-type SafeLock struct {
-	lock  sync.Mutex
-	locks int64
-}
-
-func (l *SafeLock) Lock() {
-	if l.locks < 1 {
-		l.lock.Lock()
-	}
-	atomic.AddInt64(&l.locks, 1)
-
-	return
-}
-
-func (l *SafeLock) Unlock() {
-	atomic.AddInt64(&l.locks, -1)
-	if l.locks < 1 {
-		l.lock.Unlock()
-	}
-
-	return
 }
 
 func GetENVValue(key, defaultValue string) (v string) {
@@ -87,6 +66,10 @@ func InStringMap(a map[string]bool, s string) (found bool) {
 func MustJSONMarshal(o interface{}) []byte {
 	b, _ := json.Marshal(o)
 	return b
+}
+
+func JSONMarshalIndent(o interface{}) ([]byte, error) {
+	return json.MarshalIndent(o, "", "  ")
 }
 
 func ReverseStringSlice(a []string) []string {
@@ -163,4 +146,21 @@ func IsStringMapEqualWithHash(a, b map[string]bool) bool {
 // MakeSignature makes signature from given hash string
 func MakeSignature(kp keypair.KP, networkID []byte, hash string) ([]byte, error) {
 	return kp.Sign(append(networkID, []byte(hash)...))
+}
+
+func EncodeUint64ToByteSlice(i uint64) [MaxUintEncodeByte]byte {
+	var b [MaxUintEncodeByte]byte
+	binary.BigEndian.PutUint64(b[:], i)
+	return b
+}
+
+type KV struct {
+	Key   string
+	Value uint64
+}
+
+func SortDecByValue(slice []KV) {
+	sort.Slice(slice, func(i, j int) bool {
+		return slice[i].Value > slice[j].Value
+	})
 }

@@ -22,13 +22,13 @@ type ValidatorFromJSON struct {
 	Alias    string           `json:"alias"`
 	Address  string           `json:"address"`
 	Endpoint *common.Endpoint `json:"endpoint"`
-	State    NodeState        `json:"state"`
+	State    State            `json:"state"`
 }
 
 type Validator struct {
 	sync.Mutex
 
-	state    NodeState
+	state    State
 	alias    string
 	address  string
 	endpoint *common.Endpoint
@@ -46,47 +46,12 @@ func (v *Validator) Equal(a Node) bool {
 	return false
 }
 
-func (v *Validator) DeepEqual(a Node) bool {
-	if !v.Equal(a) {
-		return false
-	}
-	if v.Endpoint().String() != a.Endpoint().String() {
-		return false
-	}
-
-	return true
-}
-
-func (v *Validator) State() NodeState {
-	return v.state
-}
-
-func (v *Validator) SetBooting() {
-	v.state = NodeStateBOOTING
-}
-
-func (v *Validator) SetSync() {
-	v.state = NodeStateSYNC
-}
-
-func (v *Validator) SetConsensus() {
-	v.state = NodeStateCONSENSUS
-}
-
-func (v *Validator) SetTerminating() {
-	v.state = NodeStateTERMINATING
-}
-
 func (v *Validator) Address() string {
 	return v.address
 }
 
 func (v *Validator) Alias() string {
 	return v.alias
-}
-
-func (v *Validator) SetAlias(s string) {
-	v.alias = s
 }
 
 func (v *Validator) Endpoint() *common.Endpoint {
@@ -98,7 +63,6 @@ func (v *Validator) MarshalJSON() ([]byte, error) {
 		"address":  v.Address(),
 		"alias":    v.Alias(),
 		"endpoint": v.Endpoint().String(),
-		"state":    v.State().String(),
 	})
 }
 
@@ -130,7 +94,6 @@ func NewValidator(address string, endpoint *common.Endpoint, alias string) (v *V
 	}
 
 	v = &Validator{
-		state:    NodeStateNONE,
 		alias:    alias,
 		address:  address,
 		endpoint: endpoint,

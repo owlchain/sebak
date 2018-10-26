@@ -1,3 +1,6 @@
+//
+// Implement CLI for payment, account creation, and freezing requests
+//
 package wallet
 
 import (
@@ -7,14 +10,15 @@ import (
 	"os"
 	"time"
 
-	cmdcommon "boscoin.io/sebak/cmd/sebak/common"
-	"boscoin.io/sebak/lib"
-	"boscoin.io/sebak/lib/common"
-	"boscoin.io/sebak/lib/network"
-
-	"boscoin.io/sebak/lib/block"
 	"github.com/spf13/cobra"
 	"github.com/stellar/go/keypair"
+
+	cmdcommon "boscoin.io/sebak/cmd/sebak/common"
+	"boscoin.io/sebak/lib/block"
+	"boscoin.io/sebak/lib/common"
+	"boscoin.io/sebak/lib/network"
+	"boscoin.io/sebak/lib/transaction"
+	"boscoin.io/sebak/lib/transaction/operation"
 )
 
 var (
@@ -23,6 +27,7 @@ var (
 	flagEndpoint      string
 	flagCreateAccount bool
 	flagDry           bool
+	flagFreeze        bool
 	flagVerbose       bool
 )
 
@@ -50,6 +55,10 @@ func init() {
 			if amount, err = cmdcommon.ParseAmountFromString(args[1]); err != nil {
 				cmdcommon.PrintFlagsError(c, "<amount>", err)
 			}
+			if flagFreeze == true && (amount%common.Unit) != 0 {
+				cmdcommon.PrintFlagsError(c, "<amount>",
+					fmt.Errorf("Amount should be an exact multiple of %v when --freeze is provided", common.Unit))
+			}
 
 			// Sender's secret seed
 			if sender, err = keypair.Parse(args[2]); err != nil {
@@ -71,7 +80,7 @@ func init() {
 
 			// At the moment this is a rather crude implementation: There is no support for pooling of transaction,
 			// 1 operation == 1 transaction
-			var tx sebak.Transaction
+			var tx transaction.Transaction
 			var connection *common.HTTP2Client
 			var senderAccount block.BlockAccount
 
@@ -93,21 +102,23 @@ func init() {
 
 			// Check that account's balance is enough before sending the transaction
 			{
-				newBalance, err = common.MustAmountFromString(senderAccount.Balance).Sub(amount)
+				newBalance, err = senderAccount.GetBalance().Sub(amount)
 				if err == nil {
-					newBalance, err = newBalance.Sub(sebak.BaseFee)
+					newBalance, err = newBalance.Sub(common.BaseFee)
 				}
 
 				if err != nil {
 					fmt.Printf("Attempting to draft %v GON (+ %v fees), but sender account only have %v GON\n",
-						amount, sebak.BaseFee, senderAccount.Balance)
+						amount, common.BaseFee, senderAccount.GetBalance())
 					os.Exit(1)
 				}
 			}
 
 			// TODO: Validate that the account doesn't already exists
-			if flagCreateAccount {
-				tx = makeTransactionCreateAccount(sender, receiver, amount, senderAccount.SequenceID)
+			if flagFreeze {
+				tx = makeTransactionCreateAccount(sender, receiver, amount, senderAccount.SequenceID, sender.Address())
+			} else if flagCreateAccount {
+				tx = makeTransactionCreateAccount(sender, receiver, amount, senderAccount.SequenceID, "")
 			} else {
 				tx = makeTransactionPayment(sender, receiver, amount, senderAccount.SequenceID)
 			}
@@ -121,7 +132,7 @@ func init() {
 			}
 			if flagDry == false {
 				if retbody, err = client.SendMessage(tx); err != nil {
-					log.Fatal("Network error: ", err, " body: ", retbody)
+					log.Fatal("Network error: ", err, " body: ", string(retbody))
 					os.Exit(1)
 				}
 			}
@@ -138,6 +149,7 @@ func init() {
 	PaymentCmd.Flags().StringVar(&flagEndpoint, "endpoint", flagEndpoint, "endpoint to send the transaction to (https / memory address)")
 	PaymentCmd.Flags().StringVar(&flagNetworkID, "network-id", flagNetworkID, "network id")
 	PaymentCmd.Flags().BoolVar(&flagCreateAccount, "create", flagCreateAccount, "Whether or not the account should be created")
+	PaymentCmd.Flags().BoolVar(&flagFreeze, "freeze", flagFreeze, "When present, the payment is a frozen account creation. Imply --create.")
 	PaymentCmd.Flags().BoolVar(&flagDry, "dry-run", flagDry, "Print the transaction instead of sending it")
 	PaymentCmd.Flags().BoolVar(&flagVerbose, "verbose", flagVerbose, "Print extra data (transaction sent, before/after balance...)")
 }
@@ -153,30 +165,31 @@ func init() {
 ///   kpDest   = Newly created account's address
 ///   amount   = Amount to send as initial value
 ///   seqid    = SequenceID of the last transaction
+///   target   = Address of the linked account, if we're creating a frozen account
 ///
 /// Returns:
 ///   `sebak.Transaction` = The generated `Transaction` creating the account
 ///
-func makeTransactionCreateAccount(kpSource keypair.KP, kpDest keypair.KP, amount common.Amount, seqid uint64) sebak.Transaction {
-	opb := sebak.NewOperationBodyCreateAccount(kpDest.Address(), amount)
+func makeTransactionCreateAccount(kpSource keypair.KP, kpDest keypair.KP, amount common.Amount, seqid uint64, target string) transaction.Transaction {
+	opb := operation.NewCreateAccount(kpDest.Address(), amount, target)
 
-	op := sebak.Operation{
-		H: sebak.OperationHeader{
-			Type: sebak.OperationCreateAccount,
+	op := operation.Operation{
+		H: operation.Header{
+			Type: operation.TypeCreateAccount,
 		},
 		B: opb,
 	}
 
-	txBody := sebak.TransactionBody{
+	txBody := transaction.Body{
 		Source:     kpSource.Address(),
-		Fee:        sebak.BaseFee,
+		Fee:        common.BaseFee,
 		SequenceID: seqid,
-		Operations: []sebak.Operation{op},
+		Operations: []operation.Operation{op},
 	}
 
-	tx := sebak.Transaction{
+	tx := transaction.Transaction{
 		T: "transaction",
-		H: sebak.TransactionHeader{
+		H: transaction.Header{
 			Created: common.NowISO8601(),
 			Hash:    txBody.MakeHashString(),
 		},
@@ -201,26 +214,26 @@ func makeTransactionCreateAccount(kpSource keypair.KP, kpDest keypair.KP, amount
 /// Returns:
 ///  `sebak.Transaction` = The generated `Transaction` to do a payment
 ///
-func makeTransactionPayment(kpSource keypair.KP, kpDest keypair.KP, amount common.Amount, seqid uint64) sebak.Transaction {
-	opb := sebak.NewOperationBodyPayment(kpDest.Address(), amount)
+func makeTransactionPayment(kpSource keypair.KP, kpDest keypair.KP, amount common.Amount, seqid uint64) transaction.Transaction {
+	opb := operation.NewPayment(kpDest.Address(), amount)
 
-	op := sebak.Operation{
-		H: sebak.OperationHeader{
-			Type: sebak.OperationPayment,
+	op := operation.Operation{
+		H: operation.Header{
+			Type: operation.TypePayment,
 		},
 		B: opb,
 	}
 
-	txBody := sebak.TransactionBody{
+	txBody := transaction.Body{
 		Source:     kpSource.Address(),
-		Fee:        common.Amount(sebak.BaseFee),
+		Fee:        common.Amount(common.BaseFee),
 		SequenceID: seqid,
-		Operations: []sebak.Operation{op},
+		Operations: []operation.Operation{op},
 	}
 
-	tx := sebak.Transaction{
+	tx := transaction.Transaction{
 		T: "transaction",
-		H: sebak.TransactionHeader{
+		H: transaction.Header{
 			Created: common.NowISO8601(),
 			Hash:    txBody.MakeHashString(),
 		},
@@ -250,7 +263,7 @@ func getSenderDetails(conn *network.HTTP2NetworkClient, sender keypair.KP) (bloc
 	var retBody []byte
 
 	//response, err = c.client.Post(u.String(), body, headers)
-	if retBody, err = conn.Get("/api/account/" + sender.Address()); err != nil {
+	if retBody, err = conn.Get("/api/v1/accounts/" + sender.Address()); err != nil {
 		return ba, err
 	}
 

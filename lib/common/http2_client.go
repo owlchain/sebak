@@ -2,22 +2,18 @@ package common
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
 )
 
 type HTTP2Client struct {
-	sync.Mutex
-
-	client http.Client
-	conn   net.Conn
+	client    http.Client
+	transport *http.Transport
 }
 
 func NewHTTP2Client(timeout, idleTimeout time.Duration, keepAlive bool) (client *HTTP2Client, err error) {
@@ -25,48 +21,39 @@ func NewHTTP2Client(timeout, idleTimeout time.Duration, keepAlive bool) (client 
 		timeout, idleTimeout = 0, 0
 	}
 
-	dialer := &net.Dialer{
-		Timeout:   1 * time.Second,
-		KeepAlive: 100000 * time.Second,
-		DualStack: true,
-	}
-
-	client = &HTTP2Client{}
-
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
 		IdleConnTimeout:   idleTimeout,
 		DisableKeepAlives: !keepAlive,
-		DialContext: func(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-			conn, err = dialer.DialContext(ctx, network, addr)
-
-			client.conn = conn
-			return conn, err
-		},
+		DialContext: (&net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 1 * time.Second,
+			DualStack: true,
+		}).DialContext,
 	}
 
 	if err = http2.ConfigureTransport(transport); err != nil {
 		return
 	}
 
-	client.client = http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // NOTE prevent redirect
+	client = &HTTP2Client{
+		client: http.Client{
+			Transport: transport,
+			Timeout:   timeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse // NOTE prevent redirect
+			},
 		},
+		transport: transport,
 	}
 
 	return
 }
 
 func (c *HTTP2Client) Close() {
-	if c.conn == nil {
-		return
-	}
-	c.conn.Close()
+	c.transport.CloseIdleConnections()
 }
 
 func (c *HTTP2Client) Get(url string, headers http.Header) (response *http.Response, err error) {
@@ -96,25 +83,9 @@ func (c *HTTP2Client) Post(url string, b []byte, headers http.Header) (response 
 	return
 }
 
-func HTTP2ClientPing(client *HTTP2Client, url string, interval time.Duration) (err error) {
-
-	do := func(url string) (err error) {
-		_, err = client.Get(url, nil)
-		return
-	}
-
-	if err = do(url); err != nil {
-		return
-	}
-
-	ticker := time.NewTicker(interval)
-	for _ = range ticker.C {
-		if err = do(url); err != nil {
-			return
-		}
-	}
-
-	return
+// It's same interface as https://golang.org/pkg/net/http/#Client.Do
+func (c *HTTP2Client) Do(req *http.Request) (*http.Response, error) {
+	return c.client.Do(req)
 }
 
 type HTTP2StreamWriter struct {

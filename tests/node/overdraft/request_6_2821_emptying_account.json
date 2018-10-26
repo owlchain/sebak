@@ -1,0 +1,24 @@
+{
+  "T": "transaction",
+  "H": {
+    "version": "",
+    "created": "2018-09-27T14:27:28.050051320+09:00",
+    "signature": "3bY1S6FBXZcZP4AXM2X9KXuxpXcecmVwyX9xeJydnsXiFeBYW5Z7fccVhJUE8v87tk4dyaLHGt8oPUE2Va3zByoU"
+  },
+  "B": {
+    "source": "GDTEPFWEITKFHSUO44NQABY2XHRBBH2UBVGJ2ZJPDREIOL2F6RAEBJE4",
+    "fee": "10000",
+    "sequence_id": 0,
+    "operations": [
+      {
+        "H": {
+          "type": "payment"
+        },
+        "B": {
+          "target": "GDIRF4UWPACXPPI4GW7CMTACTCNDIKJEHZK44RITZB4TD3YUM6CCVNGJ",
+          "amount": "990001"
+        }
+      }
+    ]
+  }
+}

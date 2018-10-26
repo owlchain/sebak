@@ -4,55 +4,43 @@ import (
 	"fmt"
 )
 
-type NodeState uint
+type State uint
 
 const (
-	NodeStateNONE NodeState = iota
-	NodeStateBOOTING
-	NodeStateSYNC
-	NodeStateCONSENSUS
-	NodeStateTERMINATING
+	StateBOOTING State = iota
+	StateCONSENSUS
+	StateSYNC
 )
 
-var NodeInitState = NodeStateNONE
-
-func (s NodeState) String() string {
+func (s State) String() string {
 	switch s {
 	case 0:
-		return "NONE"
-	case 1:
 		return "BOOTING"
+	case 1:
+		return "CONSENSUS"
 	case 2:
 		return "SYNC"
-	case 3:
-		return "CONSENSUS"
-	case 4:
-		return "TERMINATING"
 	}
 
 	return ""
 }
 
-func (s NodeState) MarshalJSON() ([]byte, error) {
+func (s State) MarshalJSON() ([]byte, error) {
 	return []byte(fmt.Sprintf("\"%s\"", s.String())), nil
 }
 
-func (s *NodeState) UnmarshalJSON(b []byte) (err error) {
+func (s *State) UnmarshalJSON(b []byte) (err error) {
 	var c int
 	switch string(b[1 : len(b)-1]) {
-	case "NONE":
-		c = 0
 	case "BOOTING":
+		c = 0
+	case "CONSENSUS":
 		c = 1
 	case "SYNC":
 		c = 2
-	case "CONSENSUS":
-		c = 3
-	case "TERMINATING":
-		c = 4
 	}
 
-	*s = NodeState(c)
+	*s = State(c)
 
 	return
 }

@@ -2,44 +2,18 @@ package storage
 
 import (
 	"fmt"
-	"io/ioutil"
-	"math"
-	"math/rand"
-	"os"
 	"reflect"
+	"sort"
 	"testing"
 
-	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 
 	"boscoin.io/sebak/lib/common"
 	"boscoin.io/sebak/lib/error"
 )
 
-func TestLevelDBBackendInitFileStorage(t *testing.T) {
-	path, _ := ioutil.TempDir("/tmp", "sebak")
-	defer CleanDB(path)
-
-	st := &LevelDBBackend{}
-	defer st.Close()
-
-	config, _ := NewConfigFromString("memory://")
-	if err := st.Init(config); err != nil {
-		t.Errorf("failed to initialize file db: %v", err)
-	}
-}
-
-func TestLevelDBBackendInitMemStorage(t *testing.T) {
-	st := &LevelDBBackend{}
-	defer st.Close()
-
-	config, _ := NewConfigFromString("memory://")
-	if err := st.Init(config); err != nil {
-		t.Errorf("failed to initialize mem db: %v", err)
-	}
-}
-
 func TestLevelDBBackendNew(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	key := "showme"
@@ -72,7 +46,7 @@ func TestLevelDBBackendNew(t *testing.T) {
 }
 
 func TestLevelDBBackendNews(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	input := map[string]int{}
@@ -103,7 +77,7 @@ func TestLevelDBBackendNews(t *testing.T) {
 }
 
 func TestLevelDBBackendHas(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	key := "showme"
@@ -127,13 +101,10 @@ func TestLevelDBBackendHas(t *testing.T) {
 }
 
 func TestLevelDBBackendGetRaw(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
-	key := "showme"
-	input := "findme"
-
-	st.New(key, input)
+	st.New("showme", "input")
 
 	// when record does not exist, it should return ErrorStorageRecordDoesNotExist
 	if _, err := st.GetRaw("vacuum"); err != errors.ErrorStorageRecordDoesNotExist {
@@ -142,7 +113,7 @@ func TestLevelDBBackendGetRaw(t *testing.T) {
 }
 
 func TestLevelDBBackendSet(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	key := "showme"
@@ -162,7 +133,7 @@ func TestLevelDBBackendSet(t *testing.T) {
 }
 
 func TestLevelDBBackendRemove(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	key := "showme"
@@ -185,106 +156,8 @@ func TestLevelDBBackendRemove(t *testing.T) {
 	}
 }
 
-func newTestFileLevelDBBackend() (st LevelDBBackend, path string, err error) {
-	path, _ = ioutil.TempDir("/tmp", "sebak")
-
-	config, _ := NewConfigFromString("memory://")
-	if err = st.Init(config); err != nil {
-		return
-	}
-
-	return
-}
-
-func generateData() map[string]string {
-	d := map[string]string{}
-
-	for i := 0; i < rand.Intn(100); i++ {
-		d[uuid.New().String()] = uuid.New().String()
-	}
-
-	return d
-}
-
-func TestLevelDBNewPerformanceSimple(t *testing.T) {
-	st, path, err := newTestFileLevelDBBackend()
-	defer st.Close()
-	if err != nil {
-		t.Errorf("failed to create leveldb: %v", err)
-		return
-	}
-	defer CleanDB(path)
-
-	var keys []string
-	data := map[string]map[string]string{}
-
-	for i := 0; i < int(math.Pow(10, 1)); i++ {
-		key := uuid.New().String()
-		d := generateData()
-		keys = append(keys, key)
-		data[key] = d
-
-		if err := st.New(key, d); err != nil {
-			t.Errorf("failed to `New`: %v", err)
-			return
-		}
-	}
-
-	for _, key := range keys {
-		fetched := map[string]string{}
-
-		if err := st.Get(key, &fetched); err != nil {
-			t.Errorf("failed to `Get`: %v", err)
-			return
-		}
-
-		if !reflect.DeepEqual(data[key], fetched) {
-			t.Errorf("fetched data from `Get` does not match")
-			return
-		}
-	}
-}
-
-func TestLevelDBNewPerformanceCheckKeyExists(t *testing.T) {
-	st, path, err := newTestFileLevelDBBackend()
-	defer st.Close()
-	if err != nil {
-		t.Errorf("failed to create leveldb: %v", err)
-		return
-	}
-	defer CleanDB(path)
-
-	var keys []string
-
-	for i := int64(0); i < int64(math.Pow(10, 4)); i++ {
-		key := uuid.New().String()
-		d := generateData()
-
-		if err := st.New(key, d); err != nil {
-			t.Errorf("failed to `New`: %v", err)
-			return
-		}
-
-		if i%1000 == 0 {
-			keys = append(keys, key)
-		}
-	}
-
-	for _, key := range keys {
-		exists, err := st.Has(key)
-		if err != nil {
-			t.Errorf("failed to `Has`: %v", err)
-			return
-		}
-		if !exists {
-			t.Errorf("inserted data was not found")
-			return
-		}
-	}
-}
-
 func TestLevelDBIterator(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	total := 300
@@ -301,14 +174,14 @@ func TestLevelDBIterator(t *testing.T) {
 	}
 
 	var collected []string
-	it, closeFunc := st.GetIterator("", false)
+	it, closeFunc := st.GetIterator("", &DefaultListOptions{reverse: false})
 	for {
 		v, hasNext := it()
 		if !hasNext {
 			break
 		}
 
-		if v.N > int64(filteredCount) {
+		if v.N > uint64(filteredCount) {
 			break
 		}
 		collected = append(collected, string(v.Key))
@@ -326,8 +199,82 @@ func TestLevelDBIterator(t *testing.T) {
 	return
 }
 
+func TestLevelDBIteratorSeek(t *testing.T) {
+	st := NewTestStorage()
+	defer st.Close()
+
+	total := 300
+
+	expected := []string{}
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("%03d", i)
+		st.New(key, 0)
+
+		expected = append(expected, key)
+	}
+
+	expected = expected[100:]
+
+	var collected []string
+	it, closeFunc := st.GetIterator("", &DefaultListOptions{reverse: false, cursor: []byte(fmt.Sprintf("%03d", 100))})
+	for {
+		v, hasNext := it()
+		if !hasNext {
+			break
+		}
+
+		collected = append(collected, string(v.Key))
+	}
+	closeFunc()
+
+	if !reflect.DeepEqual(expected, collected) {
+		t.Log(expected)
+		t.Log(collected)
+		t.Error("failed to fetch the exact sequence of items")
+	}
+
+	return
+}
+
+func TestLevelDBIteratorLimit(t *testing.T) {
+	st := NewTestStorage()
+	defer st.Close()
+
+	total := 300
+
+	expected := []string{}
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("%03d", i)
+		st.New(key, 0)
+
+		expected = append(expected, key)
+	}
+
+	expected = expected[:100]
+
+	var collected []string
+	it, closeFunc := st.GetIterator("", &DefaultListOptions{reverse: false, limit: 100})
+	for {
+		v, hasNext := it()
+		if !hasNext {
+			break
+		}
+
+		collected = append(collected, string(v.Key))
+	}
+	closeFunc()
+
+	if !reflect.DeepEqual(expected, collected) {
+		t.Log(expected)
+		t.Log(collected)
+		t.Error("failed to fetch the exact sequence of items")
+	}
+
+	return
+}
+
 func TestLevelDBIteratorReverseOrder(t *testing.T) {
-	st, _ := NewTestMemoryLevelDBBackend()
+	st := NewTestStorage()
 	defer st.Close()
 
 	total := 30
@@ -341,7 +288,7 @@ func TestLevelDBIteratorReverseOrder(t *testing.T) {
 	}
 
 	var collected []string
-	it, closeFunc := st.GetIterator("", true)
+	it, closeFunc := st.GetIterator("", &DefaultListOptions{reverse: true})
 	for {
 		v, hasNext := it()
 		if !hasNext {
@@ -362,10 +309,7 @@ func TestLevelDBIteratorReverseOrder(t *testing.T) {
 }
 
 func TestLevelDBBackendTransactionNew(t *testing.T) {
-	dbpath := fmt.Sprintf("/tmp/%s", common.GetUniqueIDFromUUID())
-	defer os.RemoveAll(dbpath)
-
-	st, _ := NewTestFileLevelDBBackend(dbpath)
+	st := NewTestStorage()
 	defer st.Close()
 
 	ts, _ := st.OpenTransaction()
@@ -403,10 +347,7 @@ func TestLevelDBBackendTransactionNew(t *testing.T) {
 }
 
 func TestLevelDBBackendTransactionDiscard(t *testing.T) {
-	dbpath := fmt.Sprintf("/tmp/%s", common.GetUniqueIDFromUUID())
-	defer os.RemoveAll(dbpath)
-
-	st, _ := NewTestFileLevelDBBackend(dbpath)
+	st := NewTestStorage()
 	defer st.Close()
 
 	ts, _ := st.OpenTransaction()
@@ -437,4 +378,55 @@ func TestLevelDBBackendTransactionDiscard(t *testing.T) {
 	}
 
 	return
+}
+
+//TODO(anarcher): SubTests
+func TestLevelDBWalk(t *testing.T) {
+	st := NewTestStorage()
+	defer st.Close()
+
+	kv := map[string]string{
+		"test-1": "1",
+		"test-2": "2",
+		"test-3": "3",
+		"test-4": "4",
+		"test-5": "5",
+	}
+	for k, v := range kv {
+		if err := st.New(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := st.New("notest-1", "notest-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		walkedKeys []string
+		cnt        int
+	)
+
+	walkOption := NewWalkOption("test-1", 10, false)
+	err := st.Walk("test-", walkOption, func(k, v []byte) (bool, error) {
+		cnt++
+		walkedKeys = append(walkedKeys, string(k))
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cnt != len(kv) {
+		t.Errorf("want: %v have: %v", len(kv), cnt)
+	}
+
+	var keys []string
+	for k, _ := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	require.Equal(t, keys, walkedKeys)
+
 }

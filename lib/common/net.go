@@ -1,13 +1,17 @@
 package common
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ulule/limiter"
 )
 
 var DefaultEndpoint int = 12345
@@ -107,6 +111,10 @@ func (e *Endpoint) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func (e *Endpoint) MarshalJSON() ([]byte, error) {
+	return json.Marshal(e.String())
+}
+
 func ParseEndpoint(endpoint string) (u *Endpoint, err error) {
 	var parsed *url.URL
 	parsed, err = url.Parse(endpoint)
@@ -134,8 +142,8 @@ func ParseEndpoint(endpoint string) (u *Endpoint, err error) {
 			return
 		}
 
-		if len(parsed.Host) < 1 || strings.HasPrefix(parsed.Host, "127.0.") {
-			parsed.Host = fmt.Sprintf("localhost:%s", parsed.Port())
+		if len(parsed.Host) < 1 {
+			parsed.Host = fmt.Sprintf("127.0.0.1:%s", parsed.Port())
 		}
 	}
 
@@ -144,4 +152,39 @@ func ParseEndpoint(endpoint string) (u *Endpoint, err error) {
 	u = (*Endpoint)(parsed)
 
 	return
+}
+
+func RequestURLFromRequest(r *http.Request) *url.URL {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+
+	return &url.URL{
+		Scheme:     scheme,
+		Opaque:     r.URL.Opaque,
+		User:       r.URL.User,
+		Host:       r.Host,
+		Path:       r.URL.Path,
+		RawPath:    r.URL.RawPath,
+		ForceQuery: r.URL.ForceQuery,
+		RawQuery:   r.URL.RawQuery,
+		Fragment:   r.URL.Fragment,
+	}
+}
+
+type RateLimitRule struct {
+	Default     limiter.Rate
+	ByIPAddress map[string]limiter.Rate
+}
+
+func NewRateLimitRule(rate limiter.Rate) RateLimitRule {
+	return RateLimitRule{
+		Default:     rate,
+		ByIPAddress: map[string]limiter.Rate{},
+	}
+}
+
+func (r RateLimitRule) Serializable() ([]byte, error) {
+	return json.Marshal(r)
 }

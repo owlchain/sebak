@@ -1,73 +1,94 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/net/http2"
 
 	logging "github.com/inconshreveable/log15"
 	"github.com/oklog/run"
 	"github.com/spf13/cobra"
 	"github.com/stellar/go/keypair"
-
-	"boscoin.io/sebak/lib"
-	"boscoin.io/sebak/lib/common"
-	"boscoin.io/sebak/lib/network"
-	"boscoin.io/sebak/lib/node"
-	"boscoin.io/sebak/lib/storage"
+	"github.com/ulule/limiter"
+	"golang.org/x/net/http2"
 
 	cmdcommon "boscoin.io/sebak/cmd/sebak/common"
-
-	"strconv"
+	"boscoin.io/sebak/lib/common"
+	"boscoin.io/sebak/lib/consensus"
+	"boscoin.io/sebak/lib/error"
+	"boscoin.io/sebak/lib/network"
+	"boscoin.io/sebak/lib/node"
+	"boscoin.io/sebak/lib/node/runner"
+	"boscoin.io/sebak/lib/storage"
+	"boscoin.io/sebak/lib/sync"
 )
 
-const defaultNetwork string = "https"
-const defaultPort int = 12345
-const defaultHost string = "0.0.0.0"
-const defaultLogLevel logging.Lvl = logging.LvlInfo
+const (
+	defaultBindURL   string      = "https://0.0.0.0:12345"
+	defaultLogFormat string      = "terminal"
+	defaultLogLevel  logging.Lvl = logging.LvlInfo
+)
 
 var (
-	flagKPSecretSeed   string = common.GetENVValue("SEBAK_SECRET_SEED", "")
-	flagNetworkID      string = common.GetENVValue("SEBAK_NETWORK_ID", "")
-	flagLogLevel       string = common.GetENVValue("SEBAK_LOG_LEVEL", defaultLogLevel.String())
-	flagLogOutput      string = common.GetENVValue("SEBAK_LOG_OUTPUT", "")
-	flagVerbose        bool   = common.GetENVValue("SEBAK_VERBOSE", "0") == "1"
-	flagEndpointString string = common.GetENVValue(
-		"SEBAK_ENDPOINT",
-		fmt.Sprintf("%s://%s:%d", defaultNetwork, defaultHost, defaultPort),
-	)
+	flagBindURL           string = common.GetENVValue("SEBAK_BIND", defaultBindURL)
+	flagBlockTime         string = common.GetENVValue("SEBAK_BLOCK_TIME", "5")
+	flagDebugPProf        bool   = common.GetENVValue("SEBAK_DEBUG_PPROF", "0") == "1"
+	flagKPSecretSeed      string = common.GetENVValue("SEBAK_SECRET_SEED", "")
+	flagLog               string = common.GetENVValue("SEBAK_LOG", "")
+	flagLogLevel          string = common.GetENVValue("SEBAK_LOG_LEVEL", defaultLogLevel.String())
+	flagLogFormat         string = common.GetENVValue("SEBAK_LOG_FORMAT", defaultLogFormat)
+	flagNetworkID         string = common.GetENVValue("SEBAK_NETWORK_ID", "")
+	flagOperationsLimit   string = common.GetENVValue("SEBAK_OPERATIONS_LIMIT", "1000")
+	flagPublishURL        string = common.GetENVValue("SEBAK_PUBLISH", "")
+	flagSyncCheckInterval string = common.GetENVValue("SEBAK_SYNC_CHECK_INTERVAL", "30s")
+	flagSyncFetchTimeout  string = common.GetENVValue("SEBAK_SYNC_FETCH_TIMEOUT", "1m")
+	flagSyncPoolSize      string = common.GetENVValue("SEBAK_SYNC_POOL_SIZE", "300")
+	flagSyncRetryInterval string = common.GetENVValue("SEBAK_SYNC_RETRY_INTERVAL", "10s")
+	flagThreshold         string = common.GetENVValue("SEBAK_THRESHOLD", "67")
+	flagTimeoutACCEPT     string = common.GetENVValue("SEBAK_TIMEOUT_ACCEPT", "2")
+	flagTimeoutINIT       string = common.GetENVValue("SEBAK_TIMEOUT_INIT", "2")
+	flagTimeoutSIGN       string = common.GetENVValue("SEBAK_TIMEOUT_SIGN", "2")
+	flagTLSCertFile       string = common.GetENVValue("SEBAK_TLS_CERT", "sebak.crt")
+	flagTLSKeyFile        string = common.GetENVValue("SEBAK_TLS_KEY", "sebak.key")
+	flagTransactionsLimit string = common.GetENVValue("SEBAK_TRANSACTIONS_LIMIT", "1000")
+	flagUnfreezingPeriod  string = common.GetENVValue("SEBAK_UNFREEZING_PERIOD", "241920")
+	flagValidators        string = common.GetENVValue("SEBAK_VALIDATORS", "")
+	flagVerbose           bool   = common.GetENVValue("SEBAK_VERBOSE", "0") == "1"
+
+	flagRateLimitAPI        cmdcommon.ListFlags // "SEBAK_RATE_LIMIT_API"
+	flagRateLimitNode       cmdcommon.ListFlags // "SEBAK_RATE_LIMIT_NODE"
 	flagStorageConfigString string
-	flagTLSCertFile         string = common.GetENVValue("SEBAK_TLS_CERT", "sebak.crt")
-	flagTLSKeyFile          string = common.GetENVValue("SEBAK_TLS_KEY", "sebak.key")
-	flagValidators          string = common.GetENVValue("SEBAK_VALIDATORS", "")
-	flagThreshold           string = common.GetENVValue("SEBAK_THRESHOLD", "66")
-	flagTimeoutINIT         string = common.GetENVValue("SEBAK_TIMEOUT_INIT", "2")
-	flagTimeoutSIGN         string = common.GetENVValue("SEBAK_TIMEOUT_SIGN", "2")
-	flagTimeoutACCEPT       string = common.GetENVValue("SEBAK_TIMEOUT_ACCEPT", "2")
-	flagTimeoutALLCONFIRM   string = common.GetENVValue("SEBAK_TIMEOUT_ALLCONFIRM", "2")
-	flagTransactionsLimit   string = common.GetENVValue("SEBAK_TRANSACTIONS_LIMIT", "1000")
 )
 
 var (
 	nodeCmd *cobra.Command
 
+	bindEndpoint      *common.Endpoint
+	blockTime         time.Duration
 	kp                *keypair.Full
-	nodeEndpoint      *common.Endpoint
+	localNode         *node.LocalNode
+	operationsLimit   uint64
+	publishEndpoint   *common.Endpoint
+	rateLimitRuleAPI  common.RateLimitRule
+	rateLimitRuleNode common.RateLimitRule
 	storageConfig     *storage.Config
-	validators        []*node.Validator
+	syncCheckInterval time.Duration
+	syncFetchTimeout  time.Duration
+	syncPoolSize      uint64
+	syncRetryInterval time.Duration
 	threshold         int
+	timeoutACCEPT     time.Duration
 	timeoutINIT       time.Duration
 	timeoutSIGN       time.Duration
-	timeoutACCEPT     time.Duration
-	timeoutALLCONFIRM time.Duration
 	transactionsLimit uint64
-	logLevel          logging.Lvl
-	log               logging.Logger
+	validators        []*node.Validator
+
+	logLevel logging.Lvl
+	log      logging.Logger = logging.New("module", "main")
 )
 
 func init() {
@@ -83,14 +104,14 @@ func init() {
 			if len(flagGenesis) != 0 {
 				var balanceStr string
 				csv := strings.Split(flagGenesis, ",")
-				if len(csv) > 2 {
+				if len(csv) < 2 || len(csv) > 3 {
 					cmdcommon.PrintFlagsError(nodeCmd, "--genesis",
-						errors.New("--genesis expects address[,balance], but more than 2 commas detected"))
+						errors.New("--genesis expects '<genesis address>,<common account>[,balance]"))
 				}
-				if len(csv) == 2 {
+				if len(csv) == 3 {
 					balanceStr = csv[1]
 				}
-				flagName, err := MakeGenesisBlock(csv[0], flagNetworkID, balanceStr, flagStorageConfigString)
+				flagName, err := makeGenesisBlock(csv[0], csv[1], flagNetworkID, balanceStr, flagStorageConfigString, log)
 				if len(flagName) != 0 || err != nil {
 					cmdcommon.PrintFlagsError(c, flagName, err)
 				}
@@ -104,7 +125,7 @@ func init() {
 				// shut down the HTTP server correctly, we get an error,
 				// and we need the binary to exit with a successfull error code for
 				// code coverage in integration test to work.
-				log.Error("Node exited with error: %v", err)
+				log.Error("Node exited with error: ", err)
 			}
 		},
 	}
@@ -123,9 +144,11 @@ func init() {
 	nodeCmd.Flags().StringVar(&flagKPSecretSeed, "secret-seed", flagKPSecretSeed, "secret seed of this node")
 	nodeCmd.Flags().StringVar(&flagNetworkID, "network-id", flagNetworkID, "network id")
 	nodeCmd.Flags().StringVar(&flagLogLevel, "log-level", flagLogLevel, "log level, {crit, error, warn, info, debug}")
-	nodeCmd.Flags().StringVar(&flagLogOutput, "log-output", flagLogOutput, "set log output file")
+	nodeCmd.Flags().StringVar(&flagLogFormat, "log-format", flagLogFormat, "log format, {terminal, json}")
+	nodeCmd.Flags().StringVar(&flagLog, "log", flagLog, "set log file")
 	nodeCmd.Flags().BoolVar(&flagVerbose, "verbose", flagVerbose, "verbose")
-	nodeCmd.Flags().StringVar(&flagEndpointString, "endpoint", flagEndpointString, "endpoint uri to listen on")
+	nodeCmd.Flags().StringVar(&flagBindURL, "bind", flagBindURL, "bind to listen on")
+	nodeCmd.Flags().StringVar(&flagPublishURL, "publish", flagPublishURL, "endpoint url for other nodes")
 	nodeCmd.Flags().StringVar(&flagStorageConfigString, "storage", flagStorageConfigString, "storage uri")
 	nodeCmd.Flags().StringVar(&flagTLSCertFile, "tls-cert", flagTLSCertFile, "tls certificate file")
 	nodeCmd.Flags().StringVar(&flagTLSKeyFile, "tls-key", flagTLSKeyFile, "tls key file")
@@ -134,19 +157,90 @@ func init() {
 	nodeCmd.Flags().StringVar(&flagTimeoutINIT, "timeout-init", flagTimeoutINIT, "timeout of the init state")
 	nodeCmd.Flags().StringVar(&flagTimeoutSIGN, "timeout-sign", flagTimeoutSIGN, "timeout of the sign state")
 	nodeCmd.Flags().StringVar(&flagTimeoutACCEPT, "timeout-accept", flagTimeoutACCEPT, "timeout of the accept state")
-	nodeCmd.Flags().StringVar(&flagTimeoutALLCONFIRM, "timeout-allconfirm", flagTimeoutALLCONFIRM, "timeout of the allconfirm state")
+	nodeCmd.Flags().StringVar(&flagBlockTime, "block-time", flagBlockTime, "block creation time")
 	nodeCmd.Flags().StringVar(&flagTransactionsLimit, "transactions-limit", flagTransactionsLimit, "transactions limit in a ballot")
+	nodeCmd.Flags().StringVar(&flagUnfreezingPeriod, "unfreezing-period", flagUnfreezingPeriod, "how long freezing must last")
+	nodeCmd.Flags().StringVar(&flagOperationsLimit, "operations-limit", flagOperationsLimit, "operations limit in a transaction")
+	nodeCmd.Flags().Var(
+		&flagRateLimitAPI,
+		"rate-limit-api",
+		fmt.Sprintf("rate limit for %s: [<ip>=]<limit>-<period>, ex) '10-S' '3.3.3.3=1000-M'", network.UrlPathPrefixAPI),
+	)
+	nodeCmd.Flags().Var(
+		&flagRateLimitNode,
+		"rate-limit-node",
+		fmt.Sprintf("rate limit for %s: [<ip>=]<limit>-<period>, ex) '10-S' '3.3.3.3=1000-M'", network.UrlPathPrefixNode),
+	)
+	nodeCmd.Flags().BoolVar(&flagDebugPProf, "debug-pprof", flagDebugPProf, "set debug pprof")
+	nodeCmd.Flags().StringVar(&flagSyncPoolSize, "sync-pool-size", flagSyncPoolSize, "sync pool size")
+	nodeCmd.Flags().StringVar(&flagSyncFetchTimeout, "sync-fetch-timeout", flagSyncFetchTimeout, "sync fetch timeout")
+	nodeCmd.Flags().StringVar(&flagSyncRetryInterval, "sync-retry-interval", flagSyncRetryInterval, "sync retry interval")
+	nodeCmd.Flags().StringVar(&flagSyncCheckInterval, "sync-check-interval", flagSyncCheckInterval, "sync check interval")
 
 	rootCmd.AddCommand(nodeCmd)
 }
 
+func parseFlagRateLimit(l cmdcommon.ListFlags, defaultRate limiter.Rate) (rule common.RateLimitRule, err error) {
+	if len(l) < 1 {
+		rule = common.NewRateLimitRule(defaultRate)
+		return
+	}
+
+	var givenRate limiter.Rate
+
+	byIPAddress := map[string]limiter.Rate{}
+	for _, s := range l {
+		sl := strings.SplitN(s, "=", 2)
+
+		var ip, r string
+		if len(sl) < 2 {
+			r = s
+		} else {
+			ip = sl[0]
+			r = sl[1]
+		}
+
+		if len(ip) > 0 {
+			if net.ParseIP(ip) == nil {
+				err = fmt.Errorf("invalid ip address")
+				return
+			}
+		}
+
+		var rate limiter.Rate
+		if rate, err = limiter.NewRateFromFormatted(r); err != nil {
+			return
+		}
+
+		if len(ip) > 0 {
+			byIPAddress[ip] = rate
+		} else {
+			givenRate = rate
+		}
+	}
+
+	if givenRate.Period < 1 && givenRate.Limit < 1 {
+		givenRate = defaultRate
+	}
+
+	rule = common.NewRateLimitRule(givenRate)
+	rule.ByIPAddress = byIPAddress
+
+	return
+}
+
 func parseFlagValidators(v string) (vs []*node.Validator, err error) {
-	splitted := strings.Fields(v)
+	splitted := strings.Fields(strings.TrimSpace(v))
 	if len(splitted) < 1 {
+		err = fmt.Errorf("must be given")
 		return
 	}
 
 	for _, v := range splitted {
+		if v == "self" {
+			continue
+		}
+
 		var validator *node.Validator
 		if validator, err = node.NewValidatorFromURI(v); err != nil {
 			return
@@ -163,9 +257,6 @@ func parseFlagsNode() {
 	if len(flagNetworkID) < 1 {
 		cmdcommon.PrintFlagsError(nodeCmd, "--network-id", errors.New("--network-id must be given"))
 	}
-	if len(flagValidators) < 1 {
-		cmdcommon.PrintFlagsError(nodeCmd, "--validators", errors.New("must be given"))
-	}
 	if len(flagKPSecretSeed) < 1 {
 		cmdcommon.PrintFlagsError(nodeCmd, "--secret-seed", errors.New("must be given"))
 	}
@@ -178,14 +269,14 @@ func parseFlagsNode() {
 		kp = parsedKP.(*keypair.Full)
 	}
 
-	if p, err := common.ParseEndpoint(flagEndpointString); err != nil {
-		cmdcommon.PrintFlagsError(nodeCmd, "--endpoint", err)
+	if p, err := common.ParseEndpoint(flagBindURL); err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, "--bind", err)
 	} else {
-		nodeEndpoint = p
-		flagEndpointString = nodeEndpoint.String()
+		bindEndpoint = p
+		flagBindURL = bindEndpoint.String()
 	}
 
-	if strings.ToLower(nodeEndpoint.Scheme) == "https" {
+	if strings.ToLower(bindEndpoint.Scheme) == "https" {
 		if _, err = os.Stat(flagTLSCertFile); os.IsNotExist(err) {
 			cmdcommon.PrintFlagsError(nodeCmd, "--tls-cert", err)
 		}
@@ -194,37 +285,45 @@ func parseFlagsNode() {
 		}
 	}
 
-	queries := nodeEndpoint.Query()
+	queries := bindEndpoint.Query()
 	queries.Add("TLSCertFile", flagTLSCertFile)
 	queries.Add("TLSKeyFile", flagTLSKeyFile)
 	queries.Add("IdleTimeout", "3s")
-	queries.Add("NodeName", node.MakeAlias(kp.Address()))
-	nodeEndpoint.RawQuery = queries.Encode()
+	bindEndpoint.RawQuery = queries.Encode()
+
+	if len(flagPublishURL) > 0 {
+		if p, err := common.ParseEndpoint(flagPublishURL); err != nil {
+			cmdcommon.PrintFlagsError(nodeCmd, "--publish", err)
+		} else {
+			publishEndpoint = p
+			flagPublishURL = publishEndpoint.String()
+		}
+	} else {
+		publishEndpoint = &common.Endpoint{}
+		*publishEndpoint = *bindEndpoint
+		publishEndpoint.Host = fmt.Sprintf("localhost:%s", publishEndpoint.Port())
+		flagPublishURL = publishEndpoint.String()
+	}
 
 	if validators, err = parseFlagValidators(flagValidators); err != nil {
 		cmdcommon.PrintFlagsError(nodeCmd, "--validators", err)
-	}
-
-	for _, n := range validators {
-		if n.Address() == kp.Address() {
-			cmdcommon.PrintFlagsError(nodeCmd, "--validator", fmt.Errorf("duplicated public address found"))
-		}
-		if n.Endpoint() == nodeEndpoint {
-			cmdcommon.PrintFlagsError(nodeCmd, "--validator", fmt.Errorf("duplicated endpoint found"))
-		}
 	}
 
 	if storageConfig, err = storage.NewConfigFromString(flagStorageConfigString); err != nil {
 		cmdcommon.PrintFlagsError(nodeCmd, "--storage", err)
 	}
 
-	timeoutINIT = getTimeout(flagTimeoutINIT, "--timeout-init")
-	timeoutSIGN = getTimeout(flagTimeoutSIGN, "--timeout-sign")
-	timeoutACCEPT = getTimeout(flagTimeoutACCEPT, "--timeout-accept")
-	timeoutALLCONFIRM = getTimeout(flagTimeoutALLCONFIRM, "--timeout-allconfirm")
+	timeoutINIT = getTime(flagTimeoutINIT, 2*time.Second, "--timeout-init")
+	timeoutSIGN = getTime(flagTimeoutSIGN, 2*time.Second, "--timeout-sign")
+	timeoutACCEPT = getTime(flagTimeoutACCEPT, 2*time.Second, "--timeout-accept")
+	blockTime = getTime(flagBlockTime, 5*time.Second, "--block-time")
 
 	if transactionsLimit, err = strconv.ParseUint(flagTransactionsLimit, 10, 64); err != nil {
 		cmdcommon.PrintFlagsError(nodeCmd, "--transactions-limit", err)
+	}
+
+	if operationsLimit, err = strconv.ParseUint(flagOperationsLimit, 10, 64); err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, "--operations-limit", err)
 	}
 
 	var tmpUint64 uint64
@@ -234,48 +333,105 @@ func parseFlagsNode() {
 		threshold = int(tmpUint64)
 	}
 
+	if common.UnfreezingPeriod, err = strconv.ParseUint(flagUnfreezingPeriod, 10, 64); err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, "--unfreezing-period", err)
+	}
+
+	if syncPoolSize, err = strconv.ParseUint(flagSyncPoolSize, 10, 64); err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, "--sync-pool-size", err)
+	}
+
+	syncRetryInterval = getTimeDuration(flagSyncRetryInterval, sync.RetryInterval, "--sync-retry-interval")
+	syncFetchTimeout = getTimeDuration(flagSyncFetchTimeout, sync.FetchTimeout, "--sync-fetch-timeout")
+	syncCheckInterval = getTimeDuration(flagSyncCheckInterval, sync.CheckBlockHeightInterval, "--sync-check-interval")
+
 	if logLevel, err = logging.LvlFromString(flagLogLevel); err != nil {
 		cmdcommon.PrintFlagsError(nodeCmd, "--log-level", err)
 	}
 
-	logHandler := logging.StdoutHandler
+	var logFormatter logging.Format
+	switch flagLogFormat {
+	case "terminal":
+		logFormatter = logging.TerminalFormat()
+	case "json":
+		logFormatter = common.JsonFormatEx(false, true)
+	default:
+		cmdcommon.PrintFlagsError(nodeCmd, "--log-format", fmt.Errorf("'%s'", flagLogFormat))
+	}
 
-	if len(flagLogOutput) < 1 {
-		flagLogOutput = "<stdout>"
-	} else {
-		if logHandler, err = logging.FileHandler(flagLogOutput, logging.JsonFormat()); err != nil {
-			cmdcommon.PrintFlagsError(nodeCmd, "--log-output", err)
+	logHandler := logging.StreamHandler(os.Stdout, logFormatter)
+	if len(flagLog) > 0 {
+		if logHandler, err = logging.FileHandler(flagLog, logFormatter); err != nil {
+			cmdcommon.PrintFlagsError(nodeCmd, "--log", err)
 		}
 	}
 
 	logHandler = logging.CallerFileHandler(logHandler)
+	logHandler = logging.LvlFilterHandler(logLevel, logHandler)
+	log.SetHandler(logHandler)
 
-	log = logging.New("module", "main")
-	log.SetHandler(logging.LvlFilterHandler(logLevel, logHandler))
-	sebak.SetLogging(logLevel, logHandler)
+	runner.SetLogging(logLevel, logHandler)
+	consensus.SetLogging(logLevel, logHandler)
 	network.SetLogging(logLevel, logHandler)
+	sync.SetLogging(logLevel, logHandler)
+
+	if len(flagRateLimitAPI) < 1 {
+		re := strings.Fields(common.GetENVValue("SEBAK_RATE_LIMIT_API", ""))
+		for _, r := range re {
+			flagRateLimitAPI.Set(r)
+		}
+	}
+
+	rateLimitRuleAPI, err = parseFlagRateLimit(flagRateLimitAPI, common.RateLimitAPI)
+	if err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, "--rate-limit-api", err)
+	}
+
+	if len(flagRateLimitNode) < 1 {
+		re := strings.Fields(common.GetENVValue("SEBAK_RATE_LIMIT_NODE", ""))
+		for _, r := range re {
+			flagRateLimitNode.Set(r)
+		}
+	}
+	rateLimitRuleNode, err = parseFlagRateLimit(flagRateLimitNode, common.RateLimitNode)
+	if err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, "--rate-limit-node", err)
+	}
 
 	log.Info("Starting Sebak")
 
 	// print flags
 	parsedFlags := []interface{}{}
 	parsedFlags = append(parsedFlags, "\n\tnetwork-id", flagNetworkID)
-	parsedFlags = append(parsedFlags, "\n\tendpoint", flagEndpointString)
+	parsedFlags = append(parsedFlags, "\n\tbind", flagBindURL)
+	parsedFlags = append(parsedFlags, "\n\tpublish", flagPublishURL)
 	parsedFlags = append(parsedFlags, "\n\tstorage", flagStorageConfigString)
 	parsedFlags = append(parsedFlags, "\n\ttls-cert", flagTLSCertFile)
 	parsedFlags = append(parsedFlags, "\n\ttls-key", flagTLSKeyFile)
 	parsedFlags = append(parsedFlags, "\n\tlog-level", flagLogLevel)
-	parsedFlags = append(parsedFlags, "\n\tlog-output", flagLogOutput)
+	parsedFlags = append(parsedFlags, "\n\tlog-format", flagLogFormat)
+	parsedFlags = append(parsedFlags, "\n\tlog", flagLog)
 	parsedFlags = append(parsedFlags, "\n\tthreshold", flagThreshold)
 	parsedFlags = append(parsedFlags, "\n\ttimeout-init", flagTimeoutINIT)
 	parsedFlags = append(parsedFlags, "\n\ttimeout-sign", flagTimeoutSIGN)
 	parsedFlags = append(parsedFlags, "\n\ttimeout-accept", flagTimeoutACCEPT)
-	parsedFlags = append(parsedFlags, "\n\ttimeout-allconfirm", flagTimeoutALLCONFIRM)
+	parsedFlags = append(parsedFlags, "\n\tblock-time", flagBlockTime)
 	parsedFlags = append(parsedFlags, "\n\ttransactions-limit", flagTransactionsLimit)
+	parsedFlags = append(parsedFlags, "\n\toperations-limit", flagOperationsLimit)
+	parsedFlags = append(parsedFlags, "\n\trate-limit-api", rateLimitRuleAPI)
+	parsedFlags = append(parsedFlags, "\n\trate-limit-node", rateLimitRuleNode)
+
+	// create current Node
+	localNode, err = node.NewLocalNode(kp, bindEndpoint, "")
+	if err != nil {
+		cmdcommon.PrintError(nodeCmd, err)
+	}
+	localNode.AddValidators(validators...)
+	localNode.SetPublishEndpoint(publishEndpoint)
 
 	var vl []interface{}
-	for i, v := range validators {
-		vl = append(vl, fmt.Sprintf("\n\tvalidator#%d", i))
+	for _, v := range localNode.GetValidators() {
+		vl = append(vl, "\n\tvalidator")
 		vl = append(
 			vl,
 			fmt.Sprintf("alias=%s address=%s endpoint=%s", v.Alias(), v.Address(), v.Endpoint()),
@@ -287,68 +443,94 @@ func parseFlagsNode() {
 
 	if flagVerbose {
 		http2.VerboseLogs = true
+		network.VerboseLogs = true
+	}
+	if flagDebugPProf {
+		runner.DebugPProf = true
 	}
 }
 
-func getTimeout(timeoutStr string, errMessage string) time.Duration {
+func getTime(timeoutStr string, defaultValue time.Duration, errMessage string) time.Duration {
 	var timeoutDuration time.Duration
-	if tmpUint64, err := strconv.ParseUint(flagTimeoutINIT, 10, 64); err != nil {
+	if tmpUint64, err := strconv.ParseUint(timeoutStr, 10, 64); err != nil {
 		cmdcommon.PrintFlagsError(nodeCmd, errMessage, err)
 	} else {
 		timeoutDuration = time.Duration(tmpUint64) * time.Second
 	}
 	if timeoutDuration == 0 {
-		timeoutDuration = 2 * time.Second
+		timeoutDuration = defaultValue
 	}
 	return timeoutDuration
 }
 
+func getTimeDuration(str string, defaultValue time.Duration, errMessage string) time.Duration {
+	if strings.TrimSpace(str) == "" {
+		return defaultValue
+	}
+	d, err := time.ParseDuration(str)
+	if err != nil {
+		cmdcommon.PrintFlagsError(nodeCmd, errMessage, err)
+	}
+	return d
+}
+
 func runNode() error {
-	// create current Node
-	localNode, err := node.NewLocalNode(kp, nodeEndpoint, "")
-	if err != nil {
-		log.Error("failed to launch main node", "error", err)
-		return err
-	}
-	localNode.AddValidators(validators...)
-
 	// create network
-	nt, err := network.NewNetwork(nodeEndpoint)
+	networkConfig, err := network.NewHTTP2NetworkConfigFromEndpoint(localNode.Alias(), bindEndpoint)
 	if err != nil {
-		log.Crit("failed to create Network", "error", err)
+		log.Crit("failed to create network", "error", err)
 		return err
 	}
 
-	policy, err := sebak.NewDefaultVotingThresholdPolicy(threshold, threshold)
+	nt := network.NewHTTP2Network(networkConfig)
+
+	policy, err := consensus.NewDefaultVotingThresholdPolicy(threshold)
 	if err != nil {
 		log.Crit("failed to create VotingThresholdPolicy", "error", err)
 		return err
 	}
 
-	isaac, err := sebak.NewISAAC([]byte(flagNetworkID), localNode, policy)
-	if err != nil {
-		log.Crit("failed to launch consensus", "error", err)
-		return err
-	}
+	connectionManager := network.NewValidatorConnectionManager(
+		localNode,
+		nt,
+		policy,
+	)
 
+	conf := common.Config{
+		TimeoutINIT:       timeoutINIT,
+		TimeoutSIGN:       timeoutSIGN,
+		TimeoutACCEPT:     timeoutACCEPT,
+		BlockTime:         blockTime,
+		TxsLimit:          int(transactionsLimit),
+		OpsLimit:          int(operationsLimit),
+		RateLimitRuleAPI:  rateLimitRuleAPI,
+		RateLimitRuleNode: rateLimitRuleNode,
+	}
 	st, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		log.Crit("failed to initialize storage", "error", err)
 		return err
 	}
 
+	c := sync.NewConfig([]byte(flagNetworkID), localNode, st, nt, connectionManager, conf)
+	//Place setting config
+	c.SyncPoolSize = syncPoolSize
+	c.FetchTimeout = syncFetchTimeout
+	c.RetryInterval = syncRetryInterval
+	c.CheckBlockHeightInterval = syncCheckInterval
+
+	syncer := c.NewSyncer()
+
+	isaac, err := consensus.NewISAAC([]byte(flagNetworkID), localNode, policy, connectionManager, st, conf, syncer)
+	if err != nil {
+		log.Crit("failed to launch consensus", "error", err)
+		return err
+	}
+
 	// Execution group.
 	var g run.Group
 	{
-		nr, err := sebak.NewNodeRunner(flagNetworkID, localNode, policy, nt, isaac, st)
-		conf := &sebak.ISAACConfiguration{
-			TimeoutINIT:       timeoutINIT,
-			TimeoutSIGN:       timeoutSIGN,
-			TimeoutACCEPT:     timeoutACCEPT,
-			TimeoutALLCONFIRM: timeoutALLCONFIRM,
-			TransactionsLimit: uint64(transactionsLimit),
-		}
-		nr.SetConf(conf)
+		nr, err := runner.NewNodeRunner(flagNetworkID, localNode, policy, nt, isaac, st, conf)
 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -363,6 +545,13 @@ func runNode() error {
 			return nil
 		}, func(error) {
 			nr.Stop()
+		})
+	}
+	{
+		g.Add(func() error {
+			return syncer.Start()
+		}, func(error) {
+			syncer.Stop()
 		})
 	}
 	{

@@ -23,6 +23,16 @@ func PrintFlagsError(cmd *cobra.Command, flagName string, err error) {
 	os.Exit(1)
 }
 
+func PrintError(cmd *cobra.Command, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+	}
+
+	cmd.Help()
+
+	os.Exit(1)
+}
+
 // Parse an input string as a monetary amount
 //
 // Commas (','), and dots ('.') and underscores ('_')
@@ -40,4 +50,19 @@ func ParseAmountFromString(input string) (common.Amount, error) {
 	amountStr = strings.Replace(amountStr, ".", "", -1)
 	amountStr = strings.Replace(amountStr, "_", "", -1)
 	return common.AmountFromString(amountStr)
+}
+
+type ListFlags []string
+
+func (i *ListFlags) Type() string {
+	return "list"
+}
+
+func (i *ListFlags) String() string {
+	return strings.Join([]string(*i), " ")
+}
+
+func (i *ListFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
 }

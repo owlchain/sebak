@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"boscoin.io/sebak/lib/common"
-	"boscoin.io/sebak/lib/observer"
+	"boscoin.io/sebak/lib/common/observer"
 	"boscoin.io/sebak/lib/storage"
 )
 
@@ -20,24 +20,26 @@ import (
 //  * 'created'
 // 	- 'ba-created-<sequential uuid1>': `BlockAccouna.Address`
 
-const BlockAccountPrefixAddress string = "ba-address-"
-const BlockAccountPrefixCreated string = "ba-created-"
-const BlockAccountSequenceIDPrefix string = "bac-ac-"
-const BlockAccountSequenceIDByAddressPrefix string = "bac-aa-"
-
 type BlockAccount struct {
-	Address    string
-	Balance    string
-	SequenceID uint64
-	CodeHash   []byte
-	RootHash   common.Hash
+	Address    string        `json:"address"`
+	Balance    common.Amount `json:"balance"`
+	SequenceID uint64        `json:"sequence_id"`
+	// An address, or "" if the account isn't frozen
+	Linked   string      `json:"linked"`
+	CodeHash []byte      `json:"code_hash"`
+	RootHash common.Hash `json:"root_hash"`
 }
 
 func NewBlockAccount(address string, balance common.Amount) *BlockAccount {
+	return NewBlockAccountLinked(address, balance, "")
+}
+
+func NewBlockAccountLinked(address string, balance common.Amount, linked string) *BlockAccount {
 	return &BlockAccount{
 		Address:    address,
-		Balance:    balance.String(),
+		Balance:    balance,
 		SequenceID: 0,
+		Linked:     linked,
 	}
 }
 
@@ -57,11 +59,26 @@ func (b *BlockAccount) Save(st *storage.LevelDBBackend) (err error) {
 	if exists {
 		err = st.Set(key, b)
 	} else {
-		// TODO consider to use, [`Transaction`](https://godoc.org/github.com/syndtr/goleveldb/leveldb#DB.OpenTransaction)
 		err = st.New(key, b)
 		createdKey := GetBlockAccountCreatedKey(common.GetUniqueIDFromUUID())
 		err = st.New(createdKey, b.Address)
 	}
+	if err != nil {
+		return
+	}
+	if b.Linked != "" {
+		frozenKey := b.NewBlockAccountFrozenKey()
+
+		exists, err = st.Has(frozenKey)
+		if err != nil {
+			return
+		}
+
+		if !exists {
+			err = st.New(frozenKey, b.Address)
+		}
+	}
+
 	if err == nil {
 		event := "saved"
 		event += " " + fmt.Sprintf("address-%s", b.Address)
@@ -71,7 +88,7 @@ func (b *BlockAccount) Save(st *storage.LevelDBBackend) (err error) {
 	bac := BlockAccountSequenceID{
 		SequenceID: b.SequenceID,
 		Address:    b.Address,
-		Balance:    b.Balance,
+		Balance:    b.GetBalance(),
 	}
 	err = bac.Save(st)
 
@@ -86,15 +103,27 @@ func (b *BlockAccount) Deserialize(encoded []byte) (err error) {
 	return common.DecodeJSONValue(encoded, b)
 }
 
+func (b *BlockAccount) NewBlockAccountFrozenKey() string {
+	return fmt.Sprintf(
+		"%s%s",
+		GetBlockAccountKeyPrefixFrozen(b.Linked),
+		b.Address,
+	)
+}
+
 func GetBlockAccountKey(address string) string {
-	return fmt.Sprintf("%s%s", BlockAccountPrefixAddress, address)
+	return fmt.Sprintf("%s%s", common.BlockAccountPrefixAddress, address)
 }
 
 func GetBlockAccountCreatedKey(created string) string {
-	return fmt.Sprintf("%s%s", BlockAccountPrefixCreated, created)
+	return fmt.Sprintf("%s%s", common.BlockAccountPrefixCreated, created)
 }
 
-func ExistBlockAccount(st *storage.LevelDBBackend, address string) (exists bool, err error) {
+func GetBlockAccountKeyPrefixFrozen(linked string) string {
+	return fmt.Sprintf("%s%s", common.BlockAccountPrefixFrozen, linked)
+}
+
+func ExistsBlockAccount(st *storage.LevelDBBackend, address string) (exists bool, err error) {
 	return st.Has(GetBlockAccountKey(address))
 }
 
@@ -106,30 +135,30 @@ func GetBlockAccount(st *storage.LevelDBBackend, address string) (b *BlockAccoun
 	return
 }
 
-func GetBlockAccountAddressesByCreated(st *storage.LevelDBBackend, reverse bool) (func() (string, bool), func()) {
-	iterFunc, closeFunc := st.GetIterator(BlockAccountPrefixCreated, reverse)
+func GetBlockAccountAddressesByCreated(st *storage.LevelDBBackend, options storage.ListOptions) (func() (string, bool, []byte), func()) {
+	iterFunc, closeFunc := st.GetIterator(common.BlockAccountPrefixCreated, options)
 
-	return (func() (string, bool) {
+	return (func() (string, bool, []byte) {
 			item, hasNext := iterFunc()
 			if !hasNext {
-				return "", false
+				return "", false, []byte{}
 			}
 
 			var address string
 			json.Unmarshal(item.Value, &address)
-			return address, hasNext
+			return address, hasNext, item.Key
 		}), (func() {
 			closeFunc()
 		})
 }
 
-func GetBlockAccountsByCreated(st *storage.LevelDBBackend, reverse bool) (func() (*BlockAccount, bool), func()) {
-	iterFunc, closeFunc := GetBlockAccountAddressesByCreated(st, reverse)
+func GetBlockAccountsByCreated(st *storage.LevelDBBackend, options storage.ListOptions) (func() (*BlockAccount, bool, []byte), func()) {
+	iterFunc, closeFunc := GetBlockAccountAddressesByCreated(st, options)
 
-	return (func() (*BlockAccount, bool) {
-			address, hasNext := iterFunc()
+	return (func() (*BlockAccount, bool, []byte) {
+			address, hasNext, cursor := iterFunc()
 			if !hasNext {
-				return nil, false
+				return nil, false, cursor
 			}
 
 			ba, err := GetBlockAccount(st, address)
@@ -137,16 +166,63 @@ func GetBlockAccountsByCreated(st *storage.LevelDBBackend, reverse bool) (func()
 			// TODO if err != nil, stopping iteration is right? how about just
 			// ignoring the missing one?
 			if err != nil {
-				return nil, false
+				return nil, false, cursor
 			}
-			return ba, hasNext
+			return ba, hasNext, cursor
 		}), (func() {
 			closeFunc()
 		})
 }
 
+func LoadBlockAccountsInsideIterator(
+	st *storage.LevelDBBackend,
+	iterFunc func() (storage.IterItem, bool),
+	closeFunc func(),
+) (
+	func() (*BlockAccount, bool, []byte),
+	func(),
+) {
+
+	return (func() (*BlockAccount, bool, []byte) {
+			item, hasNext := iterFunc()
+			if !hasNext {
+				return &BlockAccount{}, false, item.Key
+			}
+
+			var hash string
+			json.Unmarshal(item.Value, &hash)
+
+			ba, err := GetBlockAccount(st, hash)
+			if err != nil {
+				return &BlockAccount{}, false, item.Key
+			}
+
+			return ba, hasNext, item.Key
+		}), (func() {
+			closeFunc()
+		})
+}
+
+func GetBlockAccountsByLinked(st *storage.LevelDBBackend, linked string, options storage.ListOptions) (
+	func() (*BlockAccount, bool, []byte),
+	func(),
+) {
+	iterFunc, closeFunc := st.GetIterator(GetBlockAccountKeyPrefixFrozen(linked), options)
+
+	return LoadBlockAccountsInsideIterator(st, iterFunc, closeFunc)
+}
+
 func (b *BlockAccount) GetBalance() common.Amount {
-	return common.MustAmountFromString(b.Balance)
+	return b.Balance
+}
+
+func GetBlockAccountsByFrozen(st *storage.LevelDBBackend, options storage.ListOptions) (
+	func() (*BlockAccount, bool, []byte),
+	func(),
+) {
+	iterFunc, closeFunc := st.GetIterator(common.BlockAccountPrefixFrozen, options)
+
+	return LoadBlockAccountsInsideIterator(st, iterFunc, closeFunc)
 }
 
 // Add fund to an account
@@ -157,7 +233,7 @@ func (b *BlockAccount) Deposit(fund common.Amount) error {
 	if val, err := b.GetBalance().Add(fund); err != nil {
 		return err
 	} else {
-		b.Balance = val.String()
+		b.Balance = val
 	}
 	return nil
 }
@@ -165,12 +241,12 @@ func (b *BlockAccount) Deposit(fund common.Amount) error {
 // Remove fund from an account
 //
 // If the amount would make the account go negative, an `error` is returned.
-func (b *BlockAccount) Withdraw(fund common.Amount, sequenceID uint64) error {
+func (b *BlockAccount) Withdraw(fund common.Amount) error {
 	if val, err := b.GetBalance().Sub(fund); err != nil {
 		return err
 	} else {
-		b.Balance = val.String()
-		b.SequenceID = sequenceID
+		b.Balance = val
+		b.SequenceID += 1
 	}
 	return nil
 }
@@ -187,19 +263,19 @@ func (b *BlockAccount) Withdraw(fund common.Amount, sequenceID uint64) error {
 type BlockAccountSequenceID struct {
 	SequenceID uint64
 	Address    string
-	Balance    string
+	Balance    common.Amount
 }
 
 func GetBlockAccountSequenceIDKey(address string, sequenceID uint64) string {
-	return fmt.Sprintf("%s%s-%v", BlockAccountSequenceIDPrefix, address, sequenceID)
+	return fmt.Sprintf("%s%s-%v", common.BlockAccountSequenceIDPrefix, address, sequenceID)
 }
 
 func GetBlockAccountSequenceIDByAddressKey(address string) string {
-	return fmt.Sprintf("%s%s-%s", BlockAccountSequenceIDByAddressPrefix, address, common.GetUniqueIDFromUUID())
+	return fmt.Sprintf("%s%s-%s", common.BlockAccountSequenceIDByAddressPrefix, address, common.GetUniqueIDFromUUID())
 }
 
 func GetBlockAccountSequenceIDByAddressKeyPrefix(address string) string {
-	return fmt.Sprintf("%s%s-", BlockAccountSequenceIDByAddressPrefix, address)
+	return fmt.Sprintf("%s%s-", common.BlockAccountSequenceIDByAddressPrefix, address)
 }
 
 func (b *BlockAccountSequenceID) String() string {
@@ -238,14 +314,14 @@ func GetBlockAccountSequenceID(st *storage.LevelDBBackend, address string, seque
 	return
 }
 
-func GetBlockAccountSequenceIDByAddress(st *storage.LevelDBBackend, address string, reverse bool) (func() (BlockAccountSequenceID, bool), func()) {
+func GetBlockAccountSequenceIDByAddress(st *storage.LevelDBBackend, address string, options storage.ListOptions) (func() (BlockAccountSequenceID, bool, []byte), func()) {
 	prefix := GetBlockAccountSequenceIDByAddressKeyPrefix(address)
-	iterFunc, closeFunc := st.GetIterator(prefix, reverse)
+	iterFunc, closeFunc := st.GetIterator(prefix, options)
 
-	return (func() (BlockAccountSequenceID, bool) {
+	return (func() (BlockAccountSequenceID, bool, []byte) {
 			item, hasNext := iterFunc()
 			if !hasNext {
-				return BlockAccountSequenceID{}, false
+				return BlockAccountSequenceID{}, false, item.Key
 			}
 
 			var key string
@@ -253,9 +329,10 @@ func GetBlockAccountSequenceIDByAddress(st *storage.LevelDBBackend, address stri
 
 			var bac BlockAccountSequenceID
 			if err := st.Get(key, &bac); err != nil {
-				return BlockAccountSequenceID{}, false
+				return BlockAccountSequenceID{}, false, item.Key
 			}
-			return bac, hasNext
+			return bac, hasNext, item.Key
+
 		}), (func() {
 			closeFunc()
 		})
